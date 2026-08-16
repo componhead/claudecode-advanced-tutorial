@@ -1,0 +1,15 @@
+{
+  "name": "claude-code-sandbox",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Sandbox per esplorare le feature avanzate di Claude Code",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p .",
+    "test": "node --test dist/",
+    "lint": "eslint src --ext .ts"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  }
+}
