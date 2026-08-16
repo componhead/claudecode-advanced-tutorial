@@ -14,6 +14,18 @@ test("totalValueCents somma quantity * unitPriceCents", () => {
   assert.equal(total, 2000);
 });
 
+/**
+ * Verifica che le righe con quantity negativa (reso/storno) vengano
+ * ignorate nel calcolo del totale, invece di essere sottratte.
+ */
+test("totalValueCents ignora le righe con quantity negativa", () => {
+  const total = totalValueCents([
+    { sku: "A", quantity: 2, unitPriceCents: 500 },
+    { sku: "B", quantity: -3, unitPriceCents: 1000 },
+  ]);
+  assert.equal(total, 1000);
+});
+
 test("lowestStock ritorna undefined su array vuoto", () => {
   assert.equal(lowestStock([]), undefined);
 });

@@ -6,10 +6,11 @@
   "type": "module",
   "scripts": {
     "build": "tsc -p .",
-    "test": "node --test dist/",
+    "test": "node --test dist/**/*.test.js",
     "lint": "eslint src --ext .ts"
   },
   "devDependencies": {
-    "typescript": "^5.6.0"
+    "typescript": "^5.6.0",
+    "@types/node": "^22.0.0"
   }
 }

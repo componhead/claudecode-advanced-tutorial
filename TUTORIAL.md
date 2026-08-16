@@ -77,7 +77,10 @@ in-sessione — usa Opus con output più rapido, non un modello "più piccolo".
 ### 1.5 Scripting e output strutturato (con `--print`)
 
 ```bash
---output-format text|json|stream-json
+--output-format text|json|stream-json   # ATTENZIONE: con -p, "stream-json" richiede --verbose
+                                         # (verificato dal vivo: senza, errore secco "Error: When
+                                         # using --print, --output-format=stream-json requires
+                                         # --verbose" — non richiesto invece per --output-format json)
 --input-format text|stream-json
 --include-partial-messages     # chunk parziali nello stream (richiede stream-json)
 --include-hook-events          # eventi hook nello stream (richiede stream-json)
@@ -92,6 +95,59 @@ in-sessione — usa Opus con output più rapido, non un modello "più piccolo".
 Questo è il set di flag che rende Claude Code un building-block per pipeline: `stream-json`
 in/out + `--replay-user-messages` + `--forward-subagent-text` bastano per costruire una UI
 custom sopra il CLI senza reimplementare il protocollo agentic.
+
+### 1.5.1 Cosa c'è davvero nel primo evento `stream-json` (verificato dal vivo)
+
+Lanciando `claude -p "..." --output-format stream-json --include-hook-events` in questo
+sandbox, il primissimo evento è `{"type":"system","subtype":"init", ...}` e contiene molto più
+di quanto documentato altrove — utile per chi costruisce tooling sopra il CLI:
+
+- **`tools`**: la lista esatta dei tool nativi disponibili in QUESTA sessione (in questo run:
+  `Task, Bash, CronCreate, CronDelete, CronList, DesignSync, Edit, EnterWorktree, ExitWorktree,
+  ListAgents, Monitor, NotebookEdit, PushNotification, Read, RemoteTrigger, ReportFindings,
+  ScheduleWakeup, SendMessage, Skill, TaskOutput, TaskStop, ToolSearch, WebFetch, WebSearch,
+  Write`) — conferma diretta che `CronCreate`/`DesignSync`/`EnterWorktree`/`Monitor`/
+  `RemoteTrigger`/`ScheduleWakeup`/`SendMessage` (§4, §10, §13, §16) sono tool standard del
+  prodotto, non qualcosa di specifico a un singolo ambiente.
+- **`slash_commands`**: elenco completo dei comandi disponibili. Oltre a quelli già coperti in
+  questo tutorial, sono comparsi parecchi comandi non ancora documentati qui:
+  `/verify`, `/debug`, `/batch`, `/autocompact`, `/clear`, `/compact`, `/config`, `/context`,
+  `/effort`, `/heapdump`, `/reload-skills`, `/usage`, `/usage-credits`, `/extra-usage`,
+  `/insights`, `/recap`, `/goal`, `/design`, `/design-consent`, `/design-revoke`,
+  `/list-agents`, `/team-onboarding`, `/auto-mode-setup`. Alcuni si spiegano da soli
+  (`/usage*` → introspezione consumo/costi, coerente con `--max-budget-usd`; `/context` →
+  quanto contesto è occupato, citato in §17 sotto altro nome; `/heapdump` → diagnostica interna
+  del processo Claude Code stesso). Non li documento singolarmente qui perché non ne ho ancora
+  verificato il comportamento reale — ma sapere che esistono è già utile: `/<nome> --help` (o
+  semplicemente provarli) è il modo più veloce per scoprirli da soli.
+- **`agents`** e **`skills`**: confermano che gli agent/skill custom del progetto (`reviewer`,
+  `inventory-report`) sono stati caricati correttamente insieme a quelli di sistema
+  (`claude, Explore, general-purpose, Plan, statusline-setup`).
+- **`capabilities`**: `interrupt_receipt_v1`, `interrupt_cancel_queued_v1`, `msg_lifecycle_v1`
+  — il protocollo stream-json supporta l'**interruzione a metà turno** e la **cancellazione di
+  messaggi già in coda** da parte del chiamante: rilevante se stai pilotando una sessione `-p
+  --input-format stream-json` da un tuo processo e vuoi poter annullare un turno in corso.
+- **`memory_paths.auto`**: il path reale della memoria auto-persistente per questo progetto (v.
+  §9) — conferma empirica della convenzione descritta lì.
+- **`messaging_socket_path`**: un socket Unix locale (es. `/run/user/1000/cc-socks/<pid>.sock`)
+  — il meccanismo con cui `SendMessage`/cross-session (§4) comunica realmente tra processi
+  Claude Code sulla stessa macchina.
+
+Il flusso poi prosegue con eventi `rate_limit_event` (stato della finestra di rate limit —
+in questo run: `rateLimitType: "five_hour"`, più i campi `overageStatus`/`isUsingOverage` per
+capire se stai consumando overage a pagamento) e `thinking_tokens` (budget di thinking stimato,
+aggiornato in tempo reale mentre il modello ragiona, prima ancora del token di output finale).
+Nessuno di questi due è nella mia lista di flag documentati in §1.5 — li ho scoperti solo
+guardando lo stream vero.
+
+**Interruzione a metà turno, vista dal vivo**: premendo Ctrl-C durante un `-p --output-format
+stream-json` (prima che arrivasse a un `tool_use`), è comparso un messaggio `user` con testo
+`"[Request interrupted by user]"`, seguito dal `result` finale con `is_error: true`,
+`terminal_reason: "aborted_streaming"`, `subtype: "error_during_execution"`, e un `errors[]`
+con un diagnostic interno (`[ede_diagnostic] result_type=user last_content_type=n/a
+stop_reason=null`). Dettaglio da tenere a mente per chi fa scripting: la chiamata leggera ad
+Haiku (§1.5.1 sopra) era già partita ed è stata comunque fatturata (pochi decimi di centesimo)
+anche se il turno non ha prodotto risultato — un'interruzione non è sempre gratis.
 
 ### 1.6 Prestazioni e prompt cache
 
@@ -177,6 +233,51 @@ Esempio reale usato nel progetto sandbox (`.claude/settings.json`):
 
 I pattern `Tool(pattern)` funzionano sia per `Bash` (match sul comando) sia per `Edit`/`Read`
 (match sul path, glob-style).
+
+### 2.2.1 Gotcha verificato dal vivo: `permissions.allow` viene ignorato senza trust
+
+Lanciando `claude -p "..." --output-format json` in questo stesso progetto sandbox (prima di
+aver mai avviato una sessione interattiva qui), l'output ha incluso questo warning:
+
+```
+Ignoring 7 permissions.allow entries from .claude/settings.json: this workspace has not been
+trusted. Run Claude Code interactively here once and accept the trust dialog, or set
+projects["<path>"].hasTrustDialogAccepted: true in ~/.claude.json.
+```
+
+`settings.json` viene comunque letto, ma la lista `permissions.allow` è **ignorata** finché il
+workspace non è stato "trusted" — gate di sicurezza contro un `.claude/settings.json` malevolo
+in un repo appena clonato che si auto-concede permessi larghi senza approvazione umana. In `-p`
+(niente TTY) il dialog di trust non può comparire, quindi il gate resta bloccato: in CI/scripting
+questo si traduce in permessi più stretti del previsto finché non fai il trust una volta in modo
+interattivo o non imposti `hasTrustDialogAccepted: true` a mano in `~/.claude.json`.
+
+Dettaglio rilevante per chi usa la convenzione bare-repo + worktree (come questo progetto): il
+path tracciato nel warning è quello del **repo bare** (`.../claude-code-sandbox/.bare`), non del
+worktree (`WORKING/`) — il trust è per-repository, non per-worktree.
+
+### 2.2.2 Gotcha verificato dal vivo: comandi composti e modalità headless
+
+Chiedendo a Claude, in `-p`, di verificare le sue modifiche con `npm run build` (**non** in
+`permissions.allow`, solo `npm run lint`/`npm test` lo sono), ho osservato tre tentativi, tutti
+negati:
+
+1. `npm run build 2>&1 | tail -30 && npm test 2>&1 | tail -40` → negato con motivo
+   `decision_reason_type: "subcommandResults"`, messaggio *"This Bash command contains multiple
+   operations. The following part requires approval: npm run build 2>&1"* — il piping/`&&`
+   viene scomposto e valutato pezzo per pezzo, non come stringa unica.
+2. `npm run build 2>&1 | tail -30` → stesso esito.
+3. `npm run build` nudo → negato con `decision_reason_type: "other"`, messaggio diretto
+   *"This command requires approval"*.
+
+Punto chiave per chi fa scripting: in `-p` (niente TTY) un comando che richiederebbe conferma
+interattiva **non genera un prompt** — viene auto-rifiutato (`tool_result_meta.non_execution_kind:
+"user-rejected"`, anche se nessun umano ha davvero rifiutato nulla). Claude, dopo il terzo
+tentativo, ha smesso di insistere e ha chiuso il turno con `stop_reason: "end_turn"` chiedendo
+conferma nel testo del risultato finale, invece di restare bloccato o consumare altri turni.
+L'oggetto `result` finale porta anche `permission_denials[]`: un log strutturato di ogni tool
+call bloccata nel turno (nome tool, input esatto) — comodo per un audit programmatico senza
+dover fare parsing dello stream intero.
 
 ### 2.3 `claude auto-mode` — feature poco nota
 
@@ -295,7 +396,7 @@ Esempio già presente nel progetto sandbox (`.claude/settings.json`):
     "PostToolUse": [
       {
         "matcher": "Edit",
-        "hooks": [{ "type": "command", "command": "npx tsc --noEmit -p . || true" }]
+        "hooks": [{ "type": "command", "command": "npx --package=typescript tsc --noEmit -p . || true" }]
       }
     ]
   }
@@ -306,6 +407,53 @@ Il tipo `"command"` (script di shell, riceve JSON su stdin, exit code 2 = blocco
 consolidato. Versioni recenti espongono anche hook che delegano la decisione a un servizio
 HTTP o a un giudice LLM leggero: se ti servono, verifica la sintassi esatta nella versione
 installata (`claude doctor`, o prova in `--debug hooks`) prima di affidarci logica critica.
+
+### 6.1 Struttura reale degli eventi hook in `stream-json` (verificata dal vivo)
+
+Con `--include-hook-events`, ogni esecuzione di un hook produce tre eventi in sequenza, non uno
+solo — visti letteralmente in questo sandbox mentre l'hook `PostToolUse` sull'`Edit` di
+`inventory.ts` scattava:
+
+```json
+{"type":"system","subtype":"hook_started","hook_id":"...","hook_name":"PostToolUse:Edit","hook_event":"PostToolUse"}
+{"type":"system","subtype":"hook_progress","hook_id":"...","hook_name":"PostToolUse:Edit","stdout":"...","stderr":"..."}
+{"type":"system","subtype":"hook_response","hook_id":"...","hook_name":"PostToolUse:Edit","exit_code":0,"outcome":"success","output":"..."}
+```
+
+Da notare: `hook_name` è nel formato `"<HookEvent>:<Matcher>"` (qui `PostToolUse:Edit`);
+`hook_progress` può comparire più volte (stdout/stderr man mano che arrivano, utile per hook
+lenti); `hook_response` porta `exit_code` e un `outcome` (`"success"` in questo caso) oltre
+all'output completo. Questo è il modo giusto per debuggare un hook che sembra non fare nulla:
+guarda `hook_response.output`, non solo se la sessione è andata a buon fine.
+
+### 6.2 Gotcha reale colto sul fatto: `npx <tool>` senza il pacchetto installato risolve a caso
+
+Nel run che ha generato l'esempio sopra, l'hook originale (`npx tsc --noEmit -p .`) è "riuscito"
+(`exit_code: 0`) ma **non ha verificato nulla**: non essendoci `typescript` tra le dipendenze
+installate (nessun `node_modules` in questo sandbox), `npx tsc` non ha capito "voglio il
+TypeScript compiler" — è andato sul registry npm e ha eseguito un pacchetto che si chiama
+letteralmente `tsc` (deprecato, stampa solo un avviso: *"This is not the tsc command you are
+looking for"*). Il `|| true` che uso per non bloccare il flusso in caso di errore ha
+mascherato completamente il problema: l'hook sembrava verde ma non testava niente.
+
+Fix applicato (già nel `.claude/settings.json` di questo progetto): `npx --package=typescript
+tsc --noEmit -p .` — forzando npx a risolvere `tsc` specificamente dal pacchetto `typescript`,
+non per nome-comando. Vale come regola generale per qualunque hook basato su `npx <binario>`:
+se il binario non è garantito come dipendenza locale già installata, usa sempre `--package=<nome
+pacchetto reale>` per evitare di eseguire silenziosamente qualcos'altro.
+
+### 6.3 Secondo gotcha, lo stesso giorno: `|| true` maschera anche gli errori *veri*
+
+Dopo il fix sopra, l'hook ha finalmente lanciato il vero `tsc` — che però ha trovato due errori
+reali (`node:test`/`node:assert/strict` non riconosciuti, mancava `@types/node` nel progetto).
+Risultato in `hook_response`: **`exit_code: 0`, `outcome: "success"`** comunque, perché il mio
+`|| true` inghiotte qualsiasi exit code, non solo quello del "pacchetto sbagliato" — inclusi
+errori di compilazione legittimi. Lezione più generale: se costruisci automazione sopra
+`--include-hook-events` che decide in base a `exit_code`/`outcome`, un hook con `|| true` in
+coda è **sempre "verde"** a prescindere da cosa sia successo davvero — devi fare parsing del
+campo `output` (testo) per sapere se l'hook ha effettivamente trovato qualcosa. Il gap reale
+(`@types/node` mancante) è stato comunque sistemato in questo progetto — non era più solo un
+esempio didattico, era un bug vero nel sandbox.
 
 **Aggiornamento verificato**: ispezionando direttamente il binario installato (v2.1.233,
 `~/.local/share/mise/installs/claude/2.1.233/claude`) ho trovato conferma esplicita anche di
@@ -410,6 +558,13 @@ La differenza pratica rispetto a CLAUDE.md: CLAUDE.md è scritto e mantenuto da 
 auto-generata è scritta dall'agente stesso quando nota una correzione, una preferenza
 confermata, o un fatto di progetto non deducibile dal codice — e va *riletta con scetticismo*
 prima di riusarla, perché può diventare stale (nomi di funzioni rinominate, feature rimosse).
+
+**Convenzione del path, confermata dal vivo**: lanciando una sessione in questo sandbox,
+il campo `memory_paths.auto` dell'evento `system/init` (§1.5.1) è risultato
+`/home/emiliano/.claude/projects/-home-emiliano-Documents-claude-code-sandbox--bare/memory/` —
+cioè `<progetto>` **non** è il nome della cartella, ma l'intero path assoluto del repository con
+`/` sostituiti da `-` (e nel nostro caso il path tracciato è quello del **repo bare**, coerente
+col comportamento del trust dialog visto in §2.2.1 — non del worktree `WORKING/`).
 
 ---
 

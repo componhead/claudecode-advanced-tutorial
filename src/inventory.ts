@@ -1,10 +1,11 @@
 /**
  * @module inventory
- * Piccolo modulo di esempio con una funzione bacata, usato come terreno
+ * Piccolo modulo di esempio per gestire l'inventario, usato come terreno
  * di prova per esercitarsi con Claude Code (Edit, subagent di review,
  * hook post-modifica, ecc.).
  */
 
+/** Rappresenta una voce di inventario con SKU, quantità e prezzo unitario in centesimi. */
 export interface Item {
   sku: string;
   quantity: number;
@@ -13,11 +14,13 @@ export interface Item {
 
 /**
  * Calcola il valore totale dell'inventario in centesimi.
- * BUG intenzionale: non gestisce quantity negativa (reso/storno),
- * utile per esercitarsi con /code-review o un subagent di review.
+ * Le righe con quantity negativa (reso/storno) vengono ignorate.
  */
 export function totalValueCents(items: Item[]): number {
-  return items.reduce((sum, item) => sum + item.quantity * item.unitPriceCents, 0);
+  return items.reduce(
+    (sum, item) => (item.quantity < 0 ? sum : sum + item.quantity * item.unitPriceCents),
+    0,
+  );
 }
 
 /**
