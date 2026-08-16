@@ -315,6 +315,47 @@ disponibile), utile per lavorare su più worktree in parallelo senza perdere l'o
 > stato creato da zero e non da un URL remoto — la struttura risultante è comunque
 > compatibile con `--worktree`/`EnterWorktree` per lavori futuri.
 
+### 3.1 Provato dal vivo: `claude --worktree <nome>` dal sandbox
+
+```fish
+claude --worktree prova-fix -p "Esegui pwd e ls con Bash" --output-format stream-json --verbose
+```
+
+Risultati osservati:
+
+- **Path reale**: `<repo>/.bare/.claude/worktrees/prova-fix` — conferma ulteriore (dopo trust
+  §2.2.1 e memoria §9) che `.claude/worktrees/` vive dentro il **repo bare**, non nel worktree
+  da cui lanci il comando.
+- **`baseRef: fresh`** (default) ha branchato da `origin/main` — quindi include tutto ciò che è
+  già stato pushato lì, non lo stato locale non pushato di `WORKING/`.
+- **Sorpresa verificata**: `node_modules/` e `package-lock.json` erano già presenti nel
+  worktree nuovo, pronti all'uso, in meno di 2 secondi di percezione utente. Ho controllato a
+  fondo per escludere spiegazioni sbagliate prima di scriverlo qui:
+  - non è un hardlink/symlink verso il `node_modules` di `WORKING/` (inode e "birth time"
+    diversi, `stat` conferma directory reale);
+  - non è un hook Git globale del sistema (l'unico hook globale attivo è uno scanner
+    anti-secret, nessuna logica su `node_modules`/worktree);
+  - il "birth time" della directory è ~47 secondi dopo l'avvio del comando, compatibile con un
+    vero `npm install`/`npm ci` eseguito in automatico durante la creazione del worktree
+    (verosimilmente veloce perché la cache npm locale era già calda, avendo installato le
+    stesse dipendenze pochi minuti prima).
+  - Nel binario esiste una funzione `detectPackageManager` e una `symlinkDirectories`, segno che
+    esiste *qualche* logica di setup automatico dell'ambiente per i worktree — ma non sono
+    riuscito a collegarla con certezza a questo comportamento specifico, quindi non lo affermo
+    come fatto: **osservazione verificata, meccanismo esatto non confermato**.
+
+Morale pratica: se usi `--worktree` su un progetto con lockfile, non dare per scontato di dover
+rilanciare `npm install` a mano — verifica prima, potrebbe essere già pronto.
+
+**Cleanup, verificato dal vivo**: i worktree creati da Claude Code sono protetti da un file
+`locked` (`<bare>/worktrees/<nome>/locked`, contenuto: `claude session <nome> (pid ... start
+...)`), quindi `git worktree remove` semplice rifiuta con *"cannot remove a locked working
+tree"*. Nel mio test il processo che deteneva il lock (`-p`, sessione one-shot) era già
+terminato quando ho provato a rimuoverlo — il lock non era stato rilasciato automaticamente a
+fine turno. Prima di forzare, verifica che il pid nel messaggio di lock non sia più attivo
+(`ps -p <pid>`), poi `git worktree remove -f -f <nome>` (serve `-f` doppio: uno per "modifiche
+non pushate", uno per il lock).
+
 ---
 
 ## 4. Background agent, monitor, multi-sessione
