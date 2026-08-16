@@ -4,8 +4,11 @@
 > concetti generali di prompt). È rivolto a chi già usa Claude Code quotidianamente e vuole
 > spremere le funzionalità più recenti, meno documentate o in preview.
 >
-> Tutto quanto segue è stato verificato direttamente da `claude --help` (v2.1.233) e dagli
-> strumenti realmente disponibili in questa sessione — non da documentazione a memoria. Dove
+> Tutto quanto segue è stato verificato direttamente da `claude --help` (v2.1.233), dai
+> sottocomandi reali (`mcp`, `plugin`, `agents`, `project`, `ultrareview`, `auto-mode`, `import`,
+> `auth`), dagli strumenti realmente disponibili in questa sessione, e — per le sezioni 14-16,
+> aggiunte in una seconda passata — dall'ispezione diretta delle stringhe del binario installato
+> (`~/.local/share/mise/installs/claude/2.1.233/claude`). Non da documentazione a memoria. Dove
 > un dettaglio non era verificabile con certezza, è segnalato esplicitamente invece di essere
 > presentato come fatto.
 
@@ -141,11 +144,11 @@ non vuoi nessuna auto-discovery.
 | `claude gateway` | Gateway enterprise auth/telemetria |
 | `claude import <codex\|gemini>` | Importa la configurazione da un altro coding agent (`--dry-run` per anteprima) |
 | `claude install <stable\|latest\|versione>` | Installa/reinstalla il binario nativo |
-| `claude mcp ...` | Gestione MCP server (v. §9) |
-| `claude plugin ...` | Gestione plugin (v. §10) |
+| `claude mcp ...` | Gestione MCP server (v. §7) |
+| `claude plugin ...` | Gestione plugin (v. §8) |
 | `claude project purge [path]` | Cancella tutto lo stato locale di un progetto (transcript, task, file history, entry di config) |
 | `claude setup-token` | Genera un token di lunga durata (richiede subscription) |
-| `claude ultrareview [target]` | Code review cloud multi-agente sul branch corrente (o PR/branch base) — v. §13 |
+| `claude ultrareview [target]` | Code review cloud multi-agente sul branch corrente (o PR/branch base) — v. §11 |
 | `claude update`/`upgrade` | Controlla e installa aggiornamenti |
 
 ---
@@ -269,7 +272,7 @@ autonomamente quando invocarla in base alla `description` — per questo la desc
 essere scritta pensando a "quando" e non solo a "cosa fa". Le skill si possono anche invocare
 esplicitamente con `/nome-skill`.
 
-Feature bleeding-edge collegata: `claude plugin eval` (v. §10) permette di scrivere test case
+Feature bleeding-edge collegata: `claude plugin eval` (v. §8) permette di scrivere test case
 automatizzati (prompt + grader) anche per le skill impacchettate in un plugin, con un arm di
 baseline "senza plugin" per misurare l'impatto reale.
 
@@ -304,6 +307,14 @@ consolidato. Versioni recenti espongono anche hook che delegano la decisione a u
 HTTP o a un giudice LLM leggero: se ti servono, verifica la sintassi esatta nella versione
 installata (`claude doctor`, o prova in `--debug hooks`) prima di affidarci logica critica.
 
+**Aggiornamento verificato**: ispezionando direttamente il binario installato (v2.1.233,
+`~/.local/share/mise/installs/claude/2.1.233/claude`) ho trovato conferma esplicita anche di
+`WorktreeCreate` e `WorktreeRemove` come eventi hook reali — sono la via con cui `EnterWorktree`
+delega la creazione/rimozione del worktree quando la sessione **non** gira dentro un repository
+git (isolamento VCS-agnostico). Non è documentazione a memoria: è il nome letterale trovato
+nelle stringhe del binario, incrociato con la descrizione dello strumento `EnterWorktree`
+disponibile in questa sessione.
+
 ---
 
 ## 7. MCP server
@@ -328,6 +339,18 @@ connesso — non basta che sia nel file.
 `claude mcp serve` è la feature meno ovvia: espone la sessione Claude Code corrente come
 server MCP, quindi puoi far parlare un altro agente (o un'altra istanza di Claude) CON Claude
 Code stesso attraverso il protocollo MCP.
+
+### 7.1 Resync del tool-set MCP a runtime
+
+Confermato dal binario installato: esistono due tool interni, `WaitForMcpServers` e
+`RefreshMcpTools`, usati automaticamente dall'agente quando serve. Il primo aspetta che i
+server MCP ancora in fase di connessione finiscano l'handshake prima di usarne i tool (utile
+se un server è lento a partire e il primo turno lo richiederebbe subito). Il secondo
+ri-interroga i server già connessi e aggiorna la lista di tool disponibili quando la
+notifica nativa "tool-list-changed" del protocollo MCP viene persa (hiccup di connessione,
+server che annuncia mentre lo stream di notifiche era giù). Non sono comandi che lanci tu:
+è comportamento automatico di resilienza, ma spiega perché a volte un tool MCP appena
+aggiunto lato server compare nella sessione senza bisogno di riavviarla.
 
 ---
 
@@ -417,6 +440,31 @@ e possono essere agganciate a eventi GitHub (PR aperta, release pubblicata, ecc.
 autore, branch, label, draft/merged — utile per "quando questa PR viene aperta, avvia una
 review automatica" senza passare da una GitHub Action.
 
+### 10.1 `/loop` — come interpreta davvero l'input
+
+`/loop` è lo skill che programma un prompt ricorrente **per la sola durata della sessione**
+(si appoggia al cron locale sopra descritto). Dal testo del prodotto stesso (estratto
+ispezionando il binario, non riformulato a memoria), la regola di parsing dell'input è:
+
+1. **Token iniziale**: se il primo token separato da spazio combacia con `^\d+[smhd]$` (es.
+   `5m`, `2h`), quello è l'intervallo; il resto è il prompt.
+2. **Clausola finale "every"**: altrimenti, se l'input finisce con `every <N><unità>` o
+   `every <N> <parola-unità>` (es. `every 20m`, `every 5 minutes`, `every 2 hours`), quello
+   diventa l'intervallo ed è tolto dal prompt. Va riconosciuto solo se dopo "every" c'è
+   davvero un'espressione temporale — `check every PR` non ha un intervallo.
+3. **Default**: altrimenti l'intervallo è quello di default e l'intero input è il prompt.
+
+Esempio: `/loop 5m /babysit-prs` → intervallo `5m`, prompt `/babysit-prs`.
+
+**Nota su durabilità**: alla fine di ogni conferma di `/loop`, il prodotto stesso avvisa
+esplicitamente — testualmente — *"Runs until you close this session · For durable cloud-based
+loops, use /schedule"*. In altre parole: anche se in alcuni ambienti Claude Code il meccanismo
+di scheduling locale supporta in teoria job "durable" scritti su `.claude/scheduled_tasks.json`
+(persistenti tra riavvii di sessione nello stesso progetto), in questo ambiente quella modalità
+è disattivata — ogni job locale muore con la sessione. Se ti serve davvero persistenza oltre
+la sessione corrente (o oltre lo spegnimento della macchina), l'unica via robusta è `/schedule`
+(routine cloud), non il cron locale.
+
 ---
 
 ## 11. Code review cloud multi-agente
@@ -471,7 +519,70 @@ rischiare un "replace" distruttivo.
 
 ---
 
-## 14. Come usare il resto di questo progetto sandbox
+## 14. Rewind e checkpoint
+
+Feature confermata direttamente nel binario installato (non era nel report iniziale, l'ho
+aggiunta dopo verifica): **Esc-Esc** (doppio tap di Esc) o il comando `/rewind` aprono un menu
+per riportare indietro **codice e/o conversazione** a un punto precedente della sessione.
+Testo prodotto reale: *"Double-tap esc to rewind the code and/or conversation to a previous
+point in time"*.
+
+- Ogni prompt utente crea un checkpoint automatico (snapshot di file coinvolti, non dell'intero
+  disco).
+- `/rewind` da solo, dopo un turno, annulla le modifiche ai file fatte in quel turno
+  ("`/rewind` to roll back the turn's tool edits").
+- Esiste anche un flag CLI **non documentato in `--help`**: `--rewind-files <user-message-id>`
+  — richiede `--resume` (non può essere usato assieme a un nuovo prompt: *"--rewind-files is a
+  standalone operation and cannot be used with a prompt"*). Serve per riportare indietro i file
+  di una sessione ripresa a un punto preciso, identificato dall'UUID del messaggio utente,
+  via scripting — utile in pipeline dove vuoi annullare programmaticamente l'effetto di un
+  turno specifico senza passare dal menu interattivo.
+
+Limite da conoscere: le modifiche fatte da `Bash` (es. `rm`, `mv`, script che riscrivono file)
+non sono tracciate da questo meccanismo — solo le modifiche fatte tramite i tool nativi di
+editing sono ripristinabili.
+
+---
+
+## 15. Personalizzazione della sessione: statusline, keybindings, output style, multi-sessione
+
+Un gruppo di comandi/feature poco pubblicizzate ma reali, utili quando lavori con più sessioni
+Claude Code in parallelo (es. più worktree, come nel progetto sandbox):
+
+- **`/statusline`** — configura una barra di stato personalizzata sotto il box di input,
+  tipicamente delegata a uno script (`~/.claude/statusline-command.sh` o path equivalente su
+  Windows). Rilanciare `/statusline` per modificarla.
+- **`/color`** e **`/rename`** — testo prodotto reale: *"Running multiple Claude sessions? Use
+  /color and /rename to tell them apart at a glance."* `/rename <nome>` etichetta la sessione
+  (compare nel picker `/resume` e nel titolo del terminale); `/color` le assegna un colore
+  distintivo. Fondamentale se lavori con più worktree/sessioni aperte contemporaneamente, come
+  suggerito in §3.
+- **Output style** — la feature esiste tuttora, ma il comando dedicato `/output-style` è stato
+  **rimosso**: si configura ora da `/config` → *Output style*. Segnalo questo esplicitamente
+  perché è il tipo di dettaglio che invecchia più in fretta in un tutorial — se trovi guide che
+  citano `/output-style` come comando diretto, sono outdated.
+- **Keybinding personalizzate** — modificabili in `~/.claude/keybindings.json` (rebind tasti,
+  chord binding).
+
+---
+
+## 16. Agent team (teammate)
+
+Oltre ai subagent "usa e getta" (§4), esiste un concetto di **teammate**: un agente con un nome
+persistente all'interno di un "team", indirizzabile con `SendMessage` passando `to: "nome"`
+(la tabella di instradamento di `SendMessage` include esplicitamente "Teammate by name"). Per
+fermare un teammate si usa `TaskStop` passando il suo agent ID nel formato **`nome@team`**
+oppure il solo nome.
+
+Limite noto e confermato dal prodotto stesso: *"durable crons are not supported for teammates
+(teammates do not persist across sessions)"* — un teammate non sopravvive alla chiusura della
+sessione, quindi non ha senso provare a schedulargli un cron ricorrente "durevole": va trattato
+come un collaboratore effimero legato al ciclo di vita della sessione corrente, diverso da una
+routine cloud (§10) che invece è pensata proprio per sopravvivere.
+
+---
+
+## 17. Come usare il resto di questo progetto sandbox
 
 - `src/inventory.ts` — bug intenzionale (gestione `quantity` negativa non gestita in
   `totalValueCents`): buon terreno per provare `.claude/agents/reviewer.md` (subagent di sola
